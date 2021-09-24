@@ -1,13 +1,18 @@
 package com.example.scopedstorage
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.Build
 import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
 import android.widget.LinearLayout
 import android.widget.Toast
+import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.launch
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -25,6 +30,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
 
     private lateinit var internalStoragePictureAdapter: InternalStoragePictureAdapter
+
+    private var readPermissionGranted = false
+    private var writePermissionGranted = false
+
+    private lateinit var permissionsLauncher : ActivityResultLauncher<Array<String>>
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -71,6 +81,40 @@ class MainActivity : AppCompatActivity() {
 
         setupInternalStorageRecyclerView()
         loadPicturesFromInternalStorageIntoRecyclerview()
+    }
+
+    private fun updateOrRequestPermissions(){
+        val hasReadPermission = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        ) == PackageManager.PERMISSION_GRANTED
+
+        val hasWritePermission = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.WRITE_EXTERNAL_STORAGE
+        ) == PackageManager.PERMISSION_GRANTED
+
+        val minSDK29 = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+
+        readPermissionGranted = hasReadPermission
+        writePermissionGranted = hasWritePermission || minSDK29
+
+        val permissionsToRequest = mutableListOf<String>()
+
+        if(!writePermissionGranted)
+        {
+            permissionsToRequest.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        }
+
+        if(!readPermissionGranted)
+        {
+            permissionsToRequest.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+
+        if(permissionsToRequest.isNotEmpty())
+        {
+            permissionsLauncher.launch(permissionsToRequest.toTypedArray())
+        }
     }
 
     private fun setupInternalStorageRecyclerView() = binding.rvPrivatePhotos.apply {
