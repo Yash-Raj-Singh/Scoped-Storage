@@ -1,12 +1,14 @@
 package com.example.scopedstorage
 
 import android.Manifest
+import android.content.ContentValues
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Build
 import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
+import android.provider.MediaStore
 import android.widget.LinearLayout
 import android.widget.Toast
 import androidx.activity.result.ActivityResultLauncher
@@ -30,6 +32,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
 
     private lateinit var internalStoragePictureAdapter: InternalStoragePictureAdapter
+    private lateinit var externalStoragePictureAdapter: SharedPictureAdapter
 
     private var readPermissionGranted = false
     private var writePermissionGranted = false
@@ -56,22 +59,40 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        externalStoragePictureAdapter = SharedPictureAdapter {
+
+        }
+
+        permissionsLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions())
+        { permissions ->
+            readPermissionGranted = permissions[Manifest.permission.READ_EXTERNAL_STORAGE]?: readPermissionGranted
+            writePermissionGranted = permissions[Manifest.permission.WRITE_EXTERNAL_STORAGE]?: writePermissionGranted
+
+        }
+
+        updateOrRequestPermissions()
+
         val takePicture = registerForActivityResult(ActivityResultContracts.TakePicturePreview()){
             val isPrivate = binding.switchPrivate.isChecked
 
+            val isSavedSuccessfully =  when {
+                isPrivate-> savePictureToInternalStorage(UUID.randomUUID().toString(), it)
+                writePermissionGranted -> savePictureToExternalStorage(UUID.randomUUID().toString() ,it)
+                else -> false
+            }
+
             if(isPrivate)
             {
-                val isSavedSuccessfully =  savePictureToInternalStorage(UUID.randomUUID().toString(), it)
+                loadPicturesFromInternalStorageIntoRecyclerview()
+            }
 
-                if(isSavedSuccessfully)
-                {
-                    loadPicturesFromInternalStorageIntoRecyclerview()
-                    Toast.makeText(this, "Picture Saved!", Toast.LENGTH_SHORT).show()
-                }
-                else
-                {
-                    Toast.makeText(this, "Error Occurred!", Toast.LENGTH_SHORT).show()
-                }
+            if(isSavedSuccessfully)
+            {
+                Toast.makeText(this, "Picture Saved!", Toast.LENGTH_SHORT).show()
+            }
+            else
+            {
+                Toast.makeText(this, "Error Occurred!", Toast.LENGTH_SHORT).show()
             }
         }
 
@@ -114,6 +135,36 @@ class MainActivity : AppCompatActivity() {
         if(permissionsToRequest.isNotEmpty())
         {
             permissionsLauncher.launch(permissionsToRequest.toTypedArray())
+        }
+    }
+
+    private fun savePictureToExternalStorage(displayName: String, bmp: Bitmap) : Boolean
+    {
+        val imageCollection = sdk29AndUp {
+            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        }?: MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+
+        val contentValues = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, "$displayName.jpg")
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            put(MediaStore.Images.Media.WIDTH, bmp.width)
+            put(MediaStore.Images.Media.HEIGHT, bmp.height)
+
+        }
+
+        return  try {
+            contentResolver.insert(imageCollection, contentValues)?.also { uri ->
+                contentResolver.openOutputStream(uri).use { outputStream ->
+                    if(!bmp.compress(Bitmap.CompressFormat.JPEG, 100 , outputStream)){
+                        throw IOException("Error Occurred in Saving Picture!")
+                    }
+                }
+            } ?: throw IOException("Error Occurred in Creation of MediaStore!")
+            true
+        }catch (e : IOException)
+        {
+            Toast.makeText(parent, e.printStackTrace().toString(), Toast.LENGTH_SHORT).show()
+            false
         }
     }
 
