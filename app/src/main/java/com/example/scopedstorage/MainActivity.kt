@@ -1,8 +1,10 @@
 package com.example.scopedstorage
 
 import android.Manifest
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.pm.PackageManager
+import android.database.ContentObserver
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Build
@@ -39,6 +41,8 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var permissionsLauncher : ActivityResultLauncher<Array<String>>
 
+    private lateinit var contentObserver : ContentObserver
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -46,21 +50,35 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         internalStoragePictureAdapter = InternalStoragePictureAdapter {
-            val isDeleted = deletePictureFromInternalStorage(it.name)
+            lifecycleScope.launch {
+                val isDeleted = deletePictureFromInternalStorage(it.name)
 
-            if(isDeleted)
-            {
-                loadPicturesFromInternalStorageIntoRecyclerview()
-                Toast.makeText(this, "Picture Deleted!", Toast.LENGTH_SHORT).show()
-            }
-            else
-            {
-                Toast.makeText(this, "Error Occurred!", Toast.LENGTH_SHORT).show()
+                if(isDeleted)
+                {
+                    loadPicturesFromInternalStorageIntoRecyclerview()
+                    Toast.makeText(this@MainActivity, "Picture Deleted!", Toast.LENGTH_SHORT).show()
+                }
+                else
+                {
+                    Toast.makeText(this@MainActivity, "Error Occurred!", Toast.LENGTH_SHORT).show()
+                }
             }
         }
 
         externalStoragePictureAdapter = SharedPictureAdapter {
 
+        }
+
+        setupExternalStorageRecyclerView()
+        initContentObserver()
+
+        if(readPermissionGranted)
+        {
+            loadPicturesFromExternalStorageIntoRecyclerview()
+        }
+        else
+        {
+            Toast.makeText(this, "Permissions Denied!", Toast.LENGTH_SHORT).show()
         }
 
         permissionsLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions())
@@ -73,26 +91,28 @@ class MainActivity : AppCompatActivity() {
         updateOrRequestPermissions()
 
         val takePicture = registerForActivityResult(ActivityResultContracts.TakePicturePreview()){
-            val isPrivate = binding.switchPrivate.isChecked
+            lifecycleScope.launch {
+                val isPrivate = binding.switchPrivate.isChecked
 
-            val isSavedSuccessfully =  when {
-                isPrivate-> savePictureToInternalStorage(UUID.randomUUID().toString(), it)
-                writePermissionGranted -> savePictureToExternalStorage(UUID.randomUUID().toString() ,it)
-                else -> false
-            }
+                val isSavedSuccessfully =  when {
+                    isPrivate-> savePictureToInternalStorage(UUID.randomUUID().toString(), it)
+                    writePermissionGranted -> savePictureToExternalStorage(UUID.randomUUID().toString() ,it)
+                    else -> false
+                }
 
-            if(isPrivate)
-            {
-                loadPicturesFromInternalStorageIntoRecyclerview()
-            }
+                if(isPrivate)
+                {
+                    loadPicturesFromInternalStorageIntoRecyclerview()
+                }
 
-            if(isSavedSuccessfully)
-            {
-                Toast.makeText(this, "Picture Saved!", Toast.LENGTH_SHORT).show()
-            }
-            else
-            {
-                Toast.makeText(this, "Error Occurred!", Toast.LENGTH_SHORT).show()
+                if(isSavedSuccessfully)
+                {
+                    Toast.makeText(this@MainActivity, "Picture Saved!", Toast.LENGTH_SHORT).show()
+                }
+                else
+                {
+                    Toast.makeText(this@MainActivity, "Error Occurred!", Toast.LENGTH_SHORT).show()
+                }
             }
         }
 
@@ -102,6 +122,69 @@ class MainActivity : AppCompatActivity() {
 
         setupInternalStorageRecyclerView()
         loadPicturesFromInternalStorageIntoRecyclerview()
+//        loadPicturesFromExternalStorageIntoRecyclerview()
+    }
+
+    private fun initContentObserver()
+    {
+        contentObserver = object : ContentObserver(null) {
+            override fun onChange(selfChange: Boolean) {
+                if (readPermissionGranted){
+                    loadPicturesFromExternalStorageIntoRecyclerview()
+                }
+            }
+        }
+
+        contentResolver.registerContentObserver(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            true,
+            contentObserver
+        )
+    }
+
+    private suspend fun loadPicturesFromExternalStorage(): List<SharedStoragePicture>{
+        return withContext(Dispatchers.IO)
+        {
+            val collection = sdk29AndUp {
+                MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+            }?: MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+
+            val projection = arrayOf(
+                MediaStore.Images.Media._ID,
+                MediaStore.Images.Media.DISPLAY_NAME,
+                MediaStore.Images.Media.HEIGHT,
+                MediaStore.Images.Media.WIDTH
+            )
+
+            val pictures = mutableListOf<SharedStoragePicture>()
+
+            contentResolver.query(
+                collection,
+                projection,
+                null,
+                null,
+                "${MediaStore.Images.Media.DISPLAY_NAME} ASC"
+            )?.use { cursor ->
+                val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                val displayNameColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
+                val heightColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.HEIGHT)
+                val widthColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.WIDTH)
+
+                while (cursor.moveToNext())
+                {
+                    val id = cursor.getLong(idColumn)
+                    val displayName = cursor.getString(displayNameColumn)
+                    val height = cursor.getInt(heightColumn)
+                    val width = cursor.getInt(widthColumn)
+                    val contentUri = ContentUris.withAppendedId(
+                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                        id
+                    )
+                    pictures.add(SharedStoragePicture(id, displayName, width, height, contentUri))
+                }
+                pictures.toList()
+            } ?: listOf()
+        }
     }
 
     private fun updateOrRequestPermissions(){
@@ -138,38 +221,47 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun savePictureToExternalStorage(displayName: String, bmp: Bitmap) : Boolean
+    private suspend fun savePictureToExternalStorage(displayName: String, bmp: Bitmap) : Boolean
     {
-        val imageCollection = sdk29AndUp {
-            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        }?: MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-
-        val contentValues = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, "$displayName.jpg")
-            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            put(MediaStore.Images.Media.WIDTH, bmp.width)
-            put(MediaStore.Images.Media.HEIGHT, bmp.height)
-
-        }
-
-        return  try {
-            contentResolver.insert(imageCollection, contentValues)?.also { uri ->
-                contentResolver.openOutputStream(uri).use { outputStream ->
-                    if(!bmp.compress(Bitmap.CompressFormat.JPEG, 100 , outputStream)){
-                        throw IOException("Error Occurred in Saving Picture!")
-                    }
-                }
-            } ?: throw IOException("Error Occurred in Creation of MediaStore!")
-            true
-        }catch (e : IOException)
+        return withContext(Dispatchers.IO)
         {
-            Toast.makeText(parent, e.printStackTrace().toString(), Toast.LENGTH_SHORT).show()
-            false
+            val imageCollection = sdk29AndUp {
+                MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            }?: MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+
+            val contentValues = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, "$displayName.jpg")
+                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                put(MediaStore.Images.Media.WIDTH, bmp.width)
+                put(MediaStore.Images.Media.HEIGHT, bmp.height)
+
+            }
+
+            try {
+                contentResolver.insert(imageCollection, contentValues)?.also { uri ->
+                    contentResolver.openOutputStream(uri).use { outputStream ->
+                        if(!bmp.compress(Bitmap.CompressFormat.JPEG, 100 , outputStream)){
+                            throw IOException("Error Occurred in Saving Picture!")
+                        }
+                    }
+                } ?: throw IOException("Error Occurred in Creation of MediaStore!")
+                true
+            }catch (e : IOException)
+            {
+                Toast.makeText(parent, e.printStackTrace().toString(), Toast.LENGTH_SHORT).show()
+                false
+            }
         }
+
     }
 
     private fun setupInternalStorageRecyclerView() = binding.rvPrivatePhotos.apply {
         adapter = internalStoragePictureAdapter
+        layoutManager = StaggeredGridLayoutManager(2, RecyclerView.VERTICAL)
+    }
+
+    private fun setupExternalStorageRecyclerView() = binding.rvPublicPhotos.apply {
+        adapter = externalStoragePictureAdapter
         layoutManager = StaggeredGridLayoutManager(2, RecyclerView.VERTICAL)
     }
 
@@ -181,13 +273,24 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun deletePictureFromInternalStorage(filename: String) : Boolean{
-        return try {
-                deleteFile(filename)
-        } catch (e : Exception)
+    private fun loadPicturesFromExternalStorageIntoRecyclerview(){
+        lifecycleScope.launch {
+            val pictures = loadPicturesFromExternalStorage()
+
+            externalStoragePictureAdapter.submitList(pictures)
+        }
+    }
+
+    private suspend fun deletePictureFromInternalStorage(filename: String) : Boolean{
+        return withContext(Dispatchers.IO)
         {
-            Toast.makeText(parent, e.printStackTrace().toString(), Toast.LENGTH_SHORT).show()
-            false
+            try {
+                deleteFile(filename)
+            } catch (e : Exception)
+            {
+                Toast.makeText(parent, e.printStackTrace().toString(), Toast.LENGTH_SHORT).show()
+                false
+            }
         }
     }
 
@@ -197,26 +300,33 @@ class MainActivity : AppCompatActivity() {
             val files = filesDir.listFiles()
             files?.filter { it.canRead() && it.isFile && (it.name.endsWith(".jpg") || it.name.endsWith(".jpeg")) }?.map {
                 val bytes = it.readBytes()
-                val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                val bmp = BitmapFactory.decodeByteArray(bytes, 0,bytes.size)
                 InternalStoragePicture(it.name, bmp)
             }?: listOf()
         }
     }
 
-    private fun savePictureToInternalStorage(filename : String, bmp : Bitmap): Boolean
+    private suspend fun savePictureToInternalStorage(filename : String, bmp : Bitmap): Boolean
     {
-        return  try {
-            openFileOutput("$filename.jpg", MODE_PRIVATE).use { stream ->
-                if(!bmp.compress(Bitmap.CompressFormat.JPEG, 100, stream))
-                {
-                    throw IOException("Couldn't save this!")
+        return withContext(Dispatchers.IO){
+            try {
+                openFileOutput("$filename.jpg", MODE_PRIVATE).use { stream ->
+                    if(!bmp.compress(Bitmap.CompressFormat.JPEG, 100, stream))
+                    {
+                        throw IOException("Couldn't save this!")
+                    }
                 }
+                true
+            }catch (e : IOException)
+            {
+                Toast.makeText(parent, e.printStackTrace().toString(), Toast.LENGTH_SHORT).show()
+                false
             }
-            return true
-        }catch (e : IOException)
-        {
-            Toast.makeText(parent, e.printStackTrace().toString(), Toast.LENGTH_SHORT).show()
-            false
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        contentResolver.unregisterContentObserver(contentObserver)
     }
 }
