@@ -1,12 +1,14 @@
 package com.example.scopedstorage
 
 import android.Manifest
+import android.app.RecoverableSecurityException
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.pm.PackageManager
 import android.database.ContentObserver
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
 import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
@@ -14,6 +16,7 @@ import android.provider.MediaStore
 import android.widget.LinearLayout
 import android.widget.Toast
 import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.launch
 import androidx.core.content.ContextCompat
@@ -41,7 +44,11 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var permissionsLauncher : ActivityResultLauncher<Array<String>>
 
+    private lateinit var intentSenderLauncher: ActivityResultLauncher<IntentSenderRequest>
+
     private lateinit var contentObserver : ContentObserver
+
+    private var deletedImageUri: Uri? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -66,7 +73,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         externalStoragePictureAdapter = SharedPictureAdapter {
-
+            lifecycleScope.launch {
+                deletePictureFromExternalStorage(it.contentUri)
+                deletedImageUri = it.contentUri
+            }
         }
 
         setupExternalStorageRecyclerView()
@@ -89,6 +99,23 @@ class MainActivity : AppCompatActivity() {
         }
 
         updateOrRequestPermissions()
+
+        intentSenderLauncher = registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()){
+            if(it.resultCode == RESULT_OK)
+            {
+                if(Build.VERSION.SDK_INT == Build.VERSION_CODES.Q)
+                {
+                    lifecycleScope.launch {
+                        deletePictureFromExternalStorage(deletedImageUri?:return@launch)
+                    }
+                }
+                Toast.makeText(this, "Picture is in Trash!", Toast.LENGTH_SHORT).show()
+            }
+            else
+            {
+                Toast.makeText(this, "Not able to delete!", Toast.LENGTH_SHORT).show()
+            }
+        }
 
         val takePicture = registerForActivityResult(ActivityResultContracts.TakePicturePreview()){
             lifecycleScope.launch {
@@ -122,7 +149,7 @@ class MainActivity : AppCompatActivity() {
 
         setupInternalStorageRecyclerView()
         loadPicturesFromInternalStorageIntoRecyclerview()
-//        loadPicturesFromExternalStorageIntoRecyclerview()
+        loadPicturesFromExternalStorageIntoRecyclerview()
     }
 
     private fun initContentObserver()
@@ -140,6 +167,35 @@ class MainActivity : AppCompatActivity() {
             true,
             contentObserver
         )
+    }
+
+    private suspend fun deletePictureFromExternalStorage(pictureUri : Uri){
+        withContext(Dispatchers.IO)
+        {
+            try {
+                contentResolver.delete(pictureUri, null, null)
+            }catch (e: SecurityException)
+            {
+                val intentSender = when{
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ->
+                    {
+                        MediaStore.createTrashRequest(contentResolver, listOf(pictureUri), true).intentSender
+                    }
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ->{
+                        val recoverableSecurityException = e as? RecoverableSecurityException
+
+                        recoverableSecurityException?.userAction?.actionIntent?.intentSender
+                    }
+                    else->null
+                }
+                intentSender?.let {
+                    sender->
+                    intentSenderLauncher.launch(
+                        IntentSenderRequest.Builder(sender).build()
+                    )
+                }
+            }
+        }
     }
 
     private suspend fun loadPicturesFromExternalStorage(): List<SharedStoragePicture>{
